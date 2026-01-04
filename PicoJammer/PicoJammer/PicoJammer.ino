@@ -11,6 +11,7 @@
 #define EXTSERIALBAUDRATE        57600
 
 #define BUTTON_PIN               15
+#define LED_PIN                  25
 
 #define CC1101_SCK_PIN           10  // Valid SPI1 SCK
 #define CC1101_MOSI_PIN          11  // Valid SPI1 TX
@@ -24,6 +25,7 @@
 #define SIZE_FLAGS           32
 #define SIZE_MSG             256
 
+#define DEBOUNCE_DELAY 50
 
 template <uint8_t CS, uint32_t CLOCK = 2000000, BitOrder BITORDER = MSBFIRST, uint8_t MODE = SPI_MODE0>
 class PicoSPI {
@@ -133,6 +135,15 @@ class PicoSPI {
 #include <Message.h>
 #include <Radio.h>
 
+// substring: ending index is exclusive, so it is fine to use the next starting index as end
+#define STRPOS_RSSI_BEGIN     1
+#define STRPOS_LENGTH_BEGIN   3
+#define STRPOS_COUNT_BEGIN    5
+#define STRPOS_FLAGS_BEGIN    7
+#define STRPOS_TYPE_BEGIN     9
+#define STRPOS_FROM_BEGIN     11
+#define STRPOS_TO_BEGIN       17
+#define STRPOS_PAYLOAD_BEGIN  23
 
 struct _SerialBuffer {
   String   Msg            = "";
@@ -173,50 +184,57 @@ void receiveMessages() {
         }
       }
       if (messageFound) {
-        SerialBuffer[msgBufferCount].Msg = inStr;
-        SerialBuffer[msgBufferCount].t = 0;
-        msgBufferCount++;
+        if (inStr.length() > 3){
+          //normal telegram
+          if (msgBufferCount > sizeof(SerialBuffer)){
+            msgBufferCount = 0;
+          }
+          digitalWrite(LED_BUILTIN, HIGH);
+          SerialBuffer[msgBufferCount].Msg = inStr;
+          SerialBuffer[msgBufferCount].t = 0;
+          msgBufferCount++;
+          delay(10);
+          digitalWrite(LED_BUILTIN, LOW);
+        }else{
+          //RSSI message
+          String rssiIn = inStr.substring(STRPOS_RSSI_BEGIN, STRPOS_LENGTH_BEGIN);
+          int rssi = -1 * (strtol(&rssiIn[0], NULL, 16) & 0xFF);
+          if (rssi > -30){ 
+            DPRINTLN("RSSI:" + String(rssi));
+          }
+        }
       }
       inStr = "";
     }
   }
 }
 
-// substring: ending index is exclusive, so it is fine to use the next starting index as end
-#define STRPOS_RSSI_BEGIN     1
-#define STRPOS_LENGTH_BEGIN   3
-#define STRPOS_COUNT_BEGIN    5
-#define STRPOS_FLAGS_BEGIN    7
-#define STRPOS_TYPE_BEGIN     9
-#define STRPOS_FROM_BEGIN     11
-#define STRPOS_TO_BEGIN       17
-#define STRPOS_PAYLOAD_BEGIN  23
+
 
 bool fillLogTable(const _SerialBuffer &sb, uint8_t b) {
-  bool dataIsRSSIOnly = ((sb.Msg).length() == 3);
+  // bool dataIsRSSIOnly = ((sb.Msg).length() == 3);
 
-  #ifdef VDEBUG
-  if (!dataIsRSSIOnly) {
+  // #ifdef VDEBUG
+  // if (!dataIsRSSIOnly) {
     DPRINTLN(F("# PROCESSING SERIAL DATA #"));
-    DPRINT("I ");
-    DPRINT(dataIsRSSIOnly ? "R" : "P");
+    DPRINT("IP");
     DPRINT(" #");
     DPRINT(String(b));
     DPRINT(": ");
     DPRINTLN(sb.Msg);
-  }
-  #endif
+  // }
+  // #endif
 
   String rssiIn = (sb.Msg).substring(STRPOS_RSSI_BEGIN, STRPOS_LENGTH_BEGIN);
   int rssi = -1 * (strtol(&rssiIn[0], NULL, 16) & 0xFF);
 
 
-  if (dataIsRSSIOnly) {
-    if (rssi > -30){ 
-      DPRINTLN("RSSI:" + String(rssi));
-    }
-    return false;
-  }
+  // if (dataIsRSSIOnly) {
+  //   if (rssi > -30){ 
+  //     DPRINTLN("RSSI:" + String(rssi));
+  //   }
+  //   return false;
+  // }
 
   String lengthIn = (sb.Msg).substring(STRPOS_LENGTH_BEGIN, STRPOS_COUNT_BEGIN);
   uint8_t len = strtol(&lengthIn[0], NULL, 16) & 0xFF;
@@ -291,20 +309,7 @@ class JammerDevice : public Device<HalType, DefList0>, Alarm {
       // DPRINT(":"); DHEX(this->radio().rssi());DPRINTLN(";");
     }
 
-    // virtual bool process(Message& msg) {
-    //   DPRINT(F(":"));
-    //   DHEX(radio().rssi());
-    //   DHEX(msg.length());
-    //   DHEX(msg.count());
-    //   DHEX(msg.flags());
-    //   DHEX(msg.type());
-    //   msg.from().dump();
-    //   msg.to().dump();
-    //   for (uint8_t l = 0; l < msg.length() - 9; l++) DHEX(msg.buffer()[l + 9]);
-    //   DPRINTLN(";");
-    //   this->led().ledOn(millis2ticks(100));
-    //   return true;
-    // }
+    
 
     bool init (HalType& hal) {
       HMID id;
@@ -322,12 +327,54 @@ JammerDevice sdev(devinfo, 0x20);
 
 
 Message deg5;
+uint8_t fullData[] = {0x17, 0x10, 0x00, 0x8E, 0xBE, 0xBD, 0x0D, 0x64, 0x4A, 0xB1, 0x00, 0x00, 0x24, 0xEF, 0xE5, 0x22, 0x06, 0x85, 0xCB, 0x88, 0xCD, 0x27, 0x79, 0xE5};
 
 
+bool sendRaw(uint8_t* data, uint8_t len) {
+  
+ // 1. Force IDLE
+  // 0x36 = SIDLE (Exit RX/TX, turn off freq synthesizer)
+  SPI1.beginTransaction(SPISettings(6000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CC1101_CSN_PIN, LOW);
+  SPI1.transfer(0x36); 
+  digitalWrite(CC1101_CSN_PIN, HIGH);
+  SPI1.endTransaction();
+
+  // 2. FLUSH TX FIFO (The Fix!)
+  // 0x3B = SFTX (Flush the TX buffer)
+  // This deletes any leftover data from a previous failed/cut-off transmission.
+  SPI1.beginTransaction(SPISettings(6000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CC1101_CSN_PIN, LOW);
+  SPI1.transfer(0x3B); 
+  digitalWrite(CC1101_CSN_PIN, HIGH);
+  SPI1.endTransaction();
+  
+  // 3. Write Data to TX FIFO
+  SPI1.beginTransaction(SPISettings(6000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CC1101_CSN_PIN, LOW);
+  SPI1.transfer(0x7F | 0x40); // Burst write to FIFO
+  SPI1.transfer(len);         // Send length
+  for (uint8_t i = 0; i < len; i++) {
+    SPI1.transfer(data[i]);
+  }
+  digitalWrite(CC1101_CSN_PIN, HIGH);
+  SPI1.endTransaction();
+
+  // 4. Strobe TX
+  SPI1.beginTransaction(SPISettings(6000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CC1101_CSN_PIN, LOW);
+  SPI1.transfer(0x35); // STX
+  digitalWrite(CC1101_CSN_PIN, HIGH);
+  SPI1.endTransaction();
+  delay(5);
+  //digitalWrite(LED_BUILTIN, LOW);
+  return true;
+}
 
 void setup() {
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
   // 1. PC Connection
   Serial.begin(115200); 
 
@@ -360,6 +407,9 @@ void setup() {
 
   msgBufferCount = 0;
 }
+unsigned long packetCounter = 0;
+unsigned long lastTime = 0;
+unsigned long lastReleaseTime = 0;
 
 void loop() {
   // PC -> Arduino (BridgeSerial)
@@ -376,20 +426,36 @@ void loop() {
   receiveMessages();
     
 
-  // static unsigned long lastSendTime = 0;
-  // unsigned long currentMillis = millis();
+  bool isPressed = (digitalRead(BUTTON_PIN) == LOW);
+  unsigned long currentMillis = millis();
 
-  // If button is LOW (Pressed) AND 500ms has passed since last send
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    // if (currentMillis - lastSendTime >= 1) {
-      //DPRINTLN("Button Pressed: Sending Packet...");
-      
-      // Re-prepare the message (AskSinPP modifies packets in place sometimes)     
-      sdev.send(deg5);
-      
-      // lastSendTime = currentMillis;
-    // }
+  if (isPressed && currentMillis - lastReleaseTime > DEBOUNCE_DELAY) {
+      if (lastTime == 0){
+       lastTime = millis(); 
+      }
+      // sdev.send(deg5);
+      // if (!sendRaw(fullData, sizeof(fullData))){
+      //   DPRINTLN("SEND FAILED");
+      // }else{
+      //   // DPRINTLN("SEND");
+      // }
+      sendRaw(fullData, sizeof(fullData));
+      packetCounter++;
+
   }else{
+    
+    if (lastTime != 0){
+      lastReleaseTime = currentMillis;
+      SPI1.beginTransaction(SPISettings(6000000, MSBFIRST, SPI_MODE0));
+         digitalWrite(CC1101_CSN_PIN, LOW);
+         SPI1.transfer(0x36); 
+         digitalWrite(CC1101_CSN_PIN, HIGH);
+         SPI1.endTransaction();
+
+      DPRINTLN("Transmitted "+String(packetCounter)+" in "+String((millis() - lastTime))+"ms");
+      lastTime = 0;
+      packetCounter = 0;
+    }
     if (msgBufferCount > 0) {
       for (uint8_t b = 0; b < msgBufferCount; b++) {
         bool isTelegram = fillLogTable(SerialBuffer[b], b);

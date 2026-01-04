@@ -14,7 +14,7 @@
 #include <Device.h>
 #include <Register.h>
 #include <Message.h>
-#define RSSI_POLL_INTERVAL 750 //milliseconds
+#define RSSI_POLL_INTERVAL 50 //milliseconds
 
 // all library classes are placed in the namespace 'as'
 using namespace as;
@@ -74,59 +74,13 @@ class SnifferDevice : public Device<HalType, DefList0>, Alarm {
 HalType hal;
 SnifferDevice sdev(devinfo, 0x20);
 
-void sendRaw(uint8_t* data, uint8_t len) {
-  // 1. Ensure the radio is in Idle state before touching FIFO
-  //hal.radio.setIdle();
-
-  // 2. Write the raw bytes directly to the CC1101 Transmit FIFO
-  // Note: The first byte of 'data' must be the Length byte
-  hal.radio.sndData(data, len, 1);
-
-
-
-
-    // hal->prepareSend(msg);
-    bool result = false;
-    uint8_t maxsend = 10;
-    // bool ledmode = list0.ledMode();
-    // if( ledmode == 1 ) {
-    //   led().set(LedStates::send);
-    // }
-    while( result == false && maxsend > 0 ) {
-      result = hal.radio.sndData(data, len, 0);
-      DPRINT(F("<- "));
-      //msg.dump();
-      maxsend--;
-        DPRINT(F("waitAck: ")); DHEX((uint8_t)result); DPRINTLN(F(""));
-      }
-    
-    return result;
-}
-
 void setup () {
   DINIT(57600, ASKSIN_PLUS_PLUS_IDENTIFIER);
   sdev.init(hal);
   hal.radio.initReg(CC1101_FREQ2, 0x21);
   hal.radio.initReg(CC1101_FREQ1, 0x65);
   hal.radio.initReg(CC1101_FREQ0, 0xCA);
-  hal.runready();
-  HMID stacja(0xBE, 0xBD, 0x0D);
-  HMID termo(0x64,0x4A, 0xB1);
-  uint8_t data[] = {0x00, 0x00, 0x24, 0xEF, 0xE5, 0x22, 0x06, 0x85, 0xCB, 0x88, 0xCD, 0x27, 0x79, 0xE5}; 
 
-  // uint8_t data[] = {0x17, 0x10, 0x00, 0x8E, 0xBE, 0xBD, 0x0D, 0x64, 0x4A, 0xB1, 0x00, 0x00, 0x24, 0xEF, 0xE5, 0x22, 0x06, 0x85, 0xCB, 0x88, 0xCD, 0x27, 0x79, 0xE5}; 
-
-
-  Message deg5;
-  deg5.init(0x17, 0x10, 0x8E, 0x00, 0x00, 0x00);
-  deg5.to(termo);
-  deg5.from(stacja);
-  deg5.append(&data, sizeof(data));
-  // memcpy(deg5.buffer(), data, sizeof(data));
-  // memcpy(deg5.buffer() + 12, data, sizeof(data));
-  DPRINTLN("Sending SET Message...");
-  sdev.send(deg5);
-  // sendRaw(data, sizeof(data));
 }
 
 void loop() {
