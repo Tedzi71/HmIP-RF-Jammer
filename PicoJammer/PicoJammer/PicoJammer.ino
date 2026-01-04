@@ -1,251 +1,145 @@
 #include <Arduino.h>
-#include <AskSinPP.h>
+#include <SPI.h> 
+#include <map>
 
-// UART BridgeSerial(16, 17, -1, -1); 
 #define BridgeSerial Serial1
-template<class TYPE,int SIZE>
-class RingStack {
-  TYPE  _buffer[SIZE];
-  TYPE* _current;
-  int   _count;
-
-  TYPE& first () {
-    return _buffer[0];
-  }
-
-  TYPE& last () {
-    return _buffer[SIZE-1];
-  }
-
-public:
-  RingStack () {
-    _current = &first();
-    _count = 0;
-  }
-
-  int size () const { return SIZE; }
-
-  int count () const { return _count; }
-
-  bool shift () {
-    if( _count < SIZE ) _count++;
-    _current--;
-    if( _current < _buffer ) _current = &last();
-    return _count == SIZE;
-  }
-
-  bool shift (const TYPE& data) {
-    bool result = shift();
-    *_current = data;
-    return result;
-  }
-
-  TYPE& operator [] (int index) {
-    index = std::min(index,_count-1);
-    return *(_buffer + ((_current - _buffer + index) % SIZE));
-  }
-
-  const TYPE& operator [] (int index) const {
-    index = std::min(index,_count-1);
-    return *(_buffer + ((_current - _buffer + index) % SIZE));
-  }
-};
-
 
 #define VDEBUG //Verbose DEBUG -> more output
 
-
-#include <map>
-
-#define HAS_DISPLAY 0
-
-
-const String CCU_SV_DEVLIST = "AskSinAnalyzerDevList";  //name of the used system variable on the CCU containing the device list
-const String CCU_SV_ALARM   = "AskSinAnalyzerAlarm";  //name of the used system variable on the CCU for alarms
-
-#define VERSION_UPPER "3"
-#define VERSION_LOWER "7"
-
-//Pin definitions for external switches
-#define START_WIFIMANAGER_PIN    15 //LOW = on boot: start wifimanager, on run: switch between tft screens
-#define SHOW_DISPLAY_LINES_PIN   13 //LOW = show lines between rows
-#define SHOW_DISPLAY_DETAILS_PIN 12 //LOW = show detailed information on display, HIGH = show only main infos
-#define RSSI_PEAK_HOLD_MODE_PIN   4 //LOW = show peak line only for noisefloor, HIGH = show also for hm(ip) messages
-#define ONLINE_MODE_PIN          14 //LOW = enable WIFI
-
-//Pin definition for LED
-#define AP_MODE_LED_PIN          32
-
-#define SD_CS                    27
-
-//Pin definitions for serial connection to AskSinSniffer
-#define EXTSERIALTX_PIN          17
-#define EXTSERIALRX_PIN          16
+#define EXTSERIALTX_PIN          16
+#define EXTSERIALRX_PIN          17
 #define EXTSERIALBAUDRATE        57600
 
-#ifdef USE_DISPLAY
-#define TFT_LED                  33
-#define TFT_CS                    5
-#define TFT_RST                  26
-#define TFT_DC                   25
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
-U8G2_FOR_ADAFRUIT_GFX u8g;
+#define BUTTON_PIN               15
 
-#define DISPLAY_LOG_LINE_HEIGHT  15
-#define DISPLAY_LOG_OFFSET_TOP   27
-enum Screens { TELEGRAM_LIST, RSSI_TEXT, RSSI_GRAPHIC, INFO };
-uint8_t currentScreen = TELEGRAM_LIST;
-uint16_t currentCircleColor = ILI9341_RED;
-#endif
+#define CC1101_SCK_PIN           10  // Valid SPI1 SCK
+#define CC1101_MOSI_PIN          11  // Valid SPI1 TX
+#define CC1101_MISO_PIN          12  // Valid SPI1 RX
+#define CC1101_CSN_PIN           13  // Chip Select
+#define CC1101_GDO0_PIN          9   // Interrupt
 
-#define CSV_HEADER                  "num;time;rssi;fromaddress;from;toaddress;to;len;cnt;typ;flags;msg;"
-
-#define IPSIZE                16
-#define VARIABLESIZE          255
-#define DEFAULT_NTP_SERVER    "pool.ntp.org"
-#define DEFAULT_HOSTNAME      "AskSinAnalyzer"
-
-#define RSSI_PEAK_HOLD_MILLIS 30000 //30 seconds peak hold on rssi text screen
-
-struct _NetConfig {
-  char ip[IPSIZE]             = "0.0.0.0";
-  char netmask[IPSIZE]        = "0.0.0.0";
-  char gw[IPSIZE]             = "0.0.0.0";
-  char hostname[VARIABLESIZE] = DEFAULT_HOSTNAME;
-  char ntp[VARIABLESIZE]      = DEFAULT_NTP_SERVER;
-} NetConfig;
-
-enum BackendTypes { BT_CCU, BT_OTHER };
-struct _HomeMaticConfig {
-  char ccuIP[IPSIZE]            = "";
-  uint8_t backendType           = BT_CCU;
-  bool CCUuseHTTPS              = false;
-  char backendUrl[VARIABLESIZE] = "";
-} HomeMaticConfig;
-
-struct _RSSIConfig {
-  uint8_t histogramBarWidth = 5;
-  int8_t  alarmThreshold    = 0;
-  uint8_t alarmCount        = 0;
-} RSSIConfig;
-
-#define MAX_LOG_ENTRIES      51
-#define MAX_RSSILOG_ENTRIES 255
 #define SIZE_ADDRESS       (6+1)    // address has 6 chars
 #define SIZE_SERIAL        (10+1)   // serial has 10 chars
 #define SIZE_TYPE            32
 #define SIZE_FLAGS           32
 #define SIZE_MSG             256
 
-struct _LogTable {
-  uint32_t lognumber                  = 0;
-  uint8_t  len                        = 0;
-  uint8_t  cnt                        = 0;
-  time_t   time                       = 0;
-  int      rssi                       = -255;
-  char     fromSerial [SIZE_SERIAL];
-  char     toSerial   [SIZE_SERIAL];
-  char     fromAddress[SIZE_ADDRESS];
-  char     toAddress  [SIZE_ADDRESS];
-  uint8_t  typ                        = 0x00;
-  uint8_t  flags                      = 0x00;
-  char     msg        [SIZE_MSG];
-};
-RingStack<_LogTable,MAX_LOG_ENTRIES> LogTable;
 
-uint16_t   logLengthDisplay           = 0;
+template <uint8_t CS, uint32_t CLOCK = 2000000, BitOrder BITORDER = MSBFIRST, uint8_t MODE = SPI_MODE0>
+class PicoSPI {
+  public:
+    void init() {
+      pinMode(CS, OUTPUT);
+      digitalWrite(CS, HIGH);
+      
+      // Map SPI1 to the valid hardware pins
+      SPI1.setSCK(CC1101_SCK_PIN); // GP10
+      SPI1.setTX(CC1101_MOSI_PIN); // GP11
+      SPI1.setRX(CC1101_MISO_PIN); // GP12
+      
+      SPI1.begin(); 
+    }
 
-enum RssiTypes { RSSITYPE_NONE, RSSITYPE_HMRF, RSSITYPE_HMIP };
-struct _RSSILogTable {
-  time_t   time                       = 0;
-  int      rssi                       = -255;
-  uint8_t  type                       = RSSITYPE_NONE;
-  char     fromSerial [SIZE_SERIAL];
+    void shutdown() {
+      SPI1.end();
+      pinMode(CS, INPUT);
+    }
+
+    void select() {
+      digitalWrite(CS, LOW);
+    }
+
+    void deselect() {
+      digitalWrite(CS, HIGH);
+    }
+
+    // Ping is required to wake the radio
+    void ping() {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      SPI1.transfer(0); 
+      deselect();
+      SPI1.endTransaction();
+    }
+
+    void waitMiso() {
+      // Safety timeout to prevent crashing if wiring is wrong
+      unsigned long start = millis();
+      while(digitalRead(CC1101_MISO_PIN) && (millis() - start < 1000)); 
+    }
+
+    uint8_t send(uint8_t data) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      uint8_t ret = SPI1.transfer(data);
+      SPI1.endTransaction();
+      return ret;
+    }
+    
+    uint8_t strobe(uint8_t cmd) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      uint8_t ret = SPI1.transfer(cmd);
+      deselect();
+      SPI1.endTransaction();
+      return ret;
+    }
+
+    void readBurst(uint8_t * buf, uint8_t regAddr, uint8_t len) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      SPI1.transfer(regAddr);
+      for (uint8_t i = 0; i < len; i++) {
+        buf[i] = SPI1.transfer(0x00);
+      }
+      deselect();
+      SPI1.endTransaction();
+    }
+
+    void writeBurst(uint8_t regAddr, const uint8_t* buf, uint8_t len) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      SPI1.transfer(regAddr);
+      for (uint8_t i = 0; i < len; i++) {
+        SPI1.transfer(buf[i]);
+      }
+      deselect();
+      SPI1.endTransaction();
+    }
+
+    uint8_t readReg(uint8_t regAddr, uint8_t regType = 0) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      SPI1.transfer(regAddr | regType);
+      uint8_t val = SPI1.transfer(0x00);
+      deselect();
+      SPI1.endTransaction();
+      return val;
+    }
+
+    void writeReg(uint8_t regAddr, uint8_t val) {
+      SPI1.beginTransaction(SPISettings(CLOCK, BITORDER, MODE));
+      select();
+      SPI1.transfer(regAddr);
+      SPI1.transfer(val);
+      deselect();
+      SPI1.endTransaction();
+    }
 };
-RingStack<_RSSILogTable,MAX_RSSILOG_ENTRIES> RSSILogTable;
-bool       rssiValueAdded                 = false;
-bool       rssiAlarmTriggered             = false;
+
+#define EI_NOTEXTERNAL
+#include <AskSinPP.h>
+#include <Device.h>
+#include <Register.h>
+#include <Message.h>
+#include <Radio.h>
+
 
 struct _SerialBuffer {
   String   Msg            = "";
   time_t   t              = 0;
 } SerialBuffer[255];
 uint8_t  msgBufferCount = 0;
-
-// JsonArray devices;
-
-uint32_t allCount              = 0;
-unsigned long lastDebugMillis  = 0;
-bool     updating              = false;
-bool     formatfs              = false;
-bool     isOnline              = false;
-bool     timeOK                = false;
-bool     SPIFFSAvailable       = false;
-bool     sdAvailable           = false;
-bool     startWifiManager      = false;
-bool     ONLINE_MODE           = false;
-bool     RESOLVE_ADDRESS       = true;
-bool     msgBufferProcessing   = true;
-uint8_t  DISPLAY_LOG_LINES     = 15;
-time_t   bootTime              = 0;
-String   updateUrl             = "https://raw.githubusercontent.com/jp112sdl/AskSinAnalyzer/master/ota/AskSinAnalyzerESP32.bin";
-
-
-// template <class T>
-//   inline void DPRINT(T str) { Serial.print(str); }
-//   template <class T>
-//   inline void DPRINTLN(T str) { DPRINT(str); DPRINT(F("\n")); }
-//   inline void DHEX(uint8_t b) {
-//     if( b<0x10 ) Serial.print('0');
-//     Serial.print(b,HEX);
-//   }
-//   inline void DHEX(uint16_t b) { 
-//     if( b<0x10 ) Serial.print(F("000")); 
-//     else if( b<0x100 ) Serial.print(F("00"));
-//     else if( b<0x1000 ) Serial.print(F("0"));
-//     Serial.print(b,HEX);
-//   }
-//   inline void DHEX(uint32_t b) {
-//     if( b<0x10 ) Serial.print(F("0000000"));
-//     else if( b<0x100 ) Serial.print(F("000000"));
-//     else if( b<0x1000 ) Serial.print(F("00000"));
-//     else if( b<0x10000 ) Serial.print(F("0000"));
-//     else if( b<0x100000 ) Serial.print(F("000"));
-//     else if( b<0x1000000 ) Serial.print(F("00"));
-//     else if( b<0x10000000 ) Serial.print(F("0"));
-//     Serial.print(b,HEX);
-//   }
-
-//   template<typename TYPE>
-//   inline void DDEC(TYPE b) {
-//     Serial.print(b,DEC);
-//   }
-
-//   #define DINIT(baudrate,msg) \
-//     Serial.begin(baudrate); \
-//     DPRINTLN(msg);
-
-//   #define DDEVINFO(dev) \
-//     HMID devid; \
-//     dev.getDeviceID(devid); \
-//     DPRINT(F("ID: "));devid.dump(); \
-//     uint8_t serial[11]; \
-//     dev.getDeviceSerial(serial); \
-//     serial[10]=0; \
-//     DPRINT(F("  Serial: "));DPRINTLN((char*)serial);
-
-//   inline void DHEX(const uint8_t* b,uint8_t l) {
-//     for( int i=0; i<l; i++, b++) {
-//       DHEX(*b); DPRINT(F(" "));
-//     }
-//   }
-//   inline void DHEXLN(uint8_t b) { DHEX(b); DPRINT(F("\n")); }
-//   inline void DHEXLN(uint16_t b) { DHEX(b); DPRINT(F("\n")); }
-//   inline void DHEXLN(uint32_t b) { DHEX(b); DPRINT(F("\n")); }
-//   template<typename TYPE>
-//   inline void DDECLN(TYPE b) { DDEC(b); DPRINT(F("\n")); }
-//   inline void DHEXLN(const uint8_t* b,uint8_t l) { DHEX(b,l); DPRINT(F("\n")); }
-
+uint32_t allCount = 0;
 
 
 void receiveMessages() {
@@ -282,12 +176,6 @@ void receiveMessages() {
         SerialBuffer[msgBufferCount].Msg = inStr;
         SerialBuffer[msgBufferCount].t = 0;
         msgBufferCount++;
-        if (msgBufferCount > 1) {
-          DPRINTLN(F("****************"));
-          DPRINT(F("!message Buffer = "));
-          DDECLN(msgBufferCount);
-          DPRINTLN(F("****************"));
-        }
       }
       inStr = "";
     }
@@ -307,7 +195,7 @@ void receiveMessages() {
 bool fillLogTable(const _SerialBuffer &sb, uint8_t b) {
   bool dataIsRSSIOnly = ((sb.Msg).length() == 3);
 
-#ifdef VDEBUG
+  #ifdef VDEBUG
   if (!dataIsRSSIOnly) {
     DPRINTLN(F("# PROCESSING SERIAL DATA #"));
     DPRINT("I ");
@@ -317,15 +205,14 @@ bool fillLogTable(const _SerialBuffer &sb, uint8_t b) {
     DPRINT(": ");
     DPRINTLN(sb.Msg);
   }
-#endif
+  #endif
 
   String rssiIn = (sb.Msg).substring(STRPOS_RSSI_BEGIN, STRPOS_LENGTH_BEGIN);
   int rssi = -1 * (strtol(&rssiIn[0], NULL, 16) & 0xFF);
 
 
   if (dataIsRSSIOnly) {
-    //addRssiValueToRSSILogTable(rssi, sb.t, RSSITYPE_NONE, "NOISE");
-    if (rssi > -50){ 
+    if (rssi > -30){ 
       DPRINTLN("RSSI:" + String(rssi));
     }
     return false;
@@ -345,16 +232,13 @@ bool fillLogTable(const _SerialBuffer &sb, uint8_t b) {
   
   String fromStr = "";
   String toStr = "";
-  // if (ONLINE_MODE && RESOLVE_ADDRESS) {
-  //   fromStr = getSerialFromAddress(hexToDec((sb.Msg).substring(STRPOS_FROM_BEGIN, STRPOS_TO_BEGIN)));
-  //   toStr = getSerialFromAddress(hexToDec((sb.Msg).substring(STRPOS_TO_BEGIN, STRPOS_PAYLOAD_BEGIN)));
-  // }
 
   if (fromStr == "")  fromStr = "  " + (sb.Msg).substring(STRPOS_FROM_BEGIN, STRPOS_TO_BEGIN) + "  ";
   if (toStr == "")    toStr = "  " + (sb.Msg).substring(STRPOS_TO_BEGIN, STRPOS_PAYLOAD_BEGIN) + "  ";
 
   
   char msg[SIZE_MSG];
+  // pomijanie nagłówka
   (sb.Msg).substring(1+10+12).toCharArray(msg, SIZE_MSG);
   String msgStr = "";
   for (uint8_t i = 0; i< SIZE_MSG; i++) {
@@ -373,41 +257,108 @@ bool fillLogTable(const _SerialBuffer &sb, uint8_t b) {
   DPRINTLN("MSG:" + String(msgStr));
   allCount++;
 
-#ifdef VDEBUG
+  #ifdef VDEBUG
   //DPRINTLN(F("\nAdded to LogTable: "));
   DPRINT(F("######## PROCESSING ")); DDEC(allCount); DPRINTLN(F(" END ########\n"));
-#endif
+  #endif
   return true;
 }
 
 
-void addRssiValueToRSSILogTable(int8_t rssi, time_t ts, uint8_t type, const char * fromSerial) {
-  RSSILogTable.shift();
-  RSSILogTable[0].time = ts;
-  RSSILogTable[0].rssi = rssi;
-  RSSILogTable[0].type = type;
-  memcpy(RSSILogTable[0].fromSerial, fromSerial, SIZE_SERIAL);
-  rssiValueAdded = !rssiValueAdded;
-}
+using namespace as;
 
-String getSerialFromAddress(int intAdr) {
+const struct DeviceInfo PROGMEM devinfo = {
+  {0xFF, 0xFF, 0xFF},     // Device ID
+  "..........",           // Device Serial
+  {0x00, 0x00},           // Device Model
+  0x10,                   // Firmware Version
+  as::DeviceType::Remote, // Device Type
+  {0x00, 0x00}            // Info Bytes
+};
 
-  return "";
-}
+typedef AskSin<StatusLed<4>, NoBattery, Radio<PicoSPI<CC1101_CSN_PIN, 2000000, MSBFIRST, SPI_MODE0>, CC1101_GDO0_PIN>> HalType;
+class JammerDevice : public Device<HalType, DefList0>, Alarm {
+    DefList0 l0;
+  public:
+    typedef Device<HalType, DefList0> BaseDevice;
+    JammerDevice (const DeviceInfo& i, uint16_t addr) : BaseDevice(i, addr, l0, 0), Alarm(0), l0(addr)  {}
+    virtual ~JammerDevice () {}
+
+    virtual void trigger (__attribute__ ((unused)) AlarmClock& clock) {
+      // set(millis2ticks(RSSI_POLL_INTERVAL));
+      // clock.add(*this);
+      // this->radio().pollRSSI();
+      // DPRINT(":"); DHEX(this->radio().rssi());DPRINTLN(";");
+    }
+
+    // virtual bool process(Message& msg) {
+    //   DPRINT(F(":"));
+    //   DHEX(radio().rssi());
+    //   DHEX(msg.length());
+    //   DHEX(msg.count());
+    //   DHEX(msg.flags());
+    //   DHEX(msg.type());
+    //   msg.from().dump();
+    //   msg.to().dump();
+    //   for (uint8_t l = 0; l < msg.length() - 9; l++) DHEX(msg.buffer()[l + 9]);
+    //   DPRINTLN(";");
+    //   this->led().ledOn(millis2ticks(100));
+    //   return true;
+    // }
+
+    bool init (HalType& hal) {
+      HMID id;
+      this->setHal(hal);
+      this->getDeviceID(id);
+      hal.init(id);
+      hal.config(this->getConfigArea());
+      sysclock.add(*this);
+      return false;
+    }
+};
+
+HalType hal;
+JammerDevice sdev(devinfo, 0x20);
+
+
+Message deg5;
+
 
 
 void setup() {
 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   // 1. PC Connection
   Serial.begin(115200); 
 
   // 2. Arduino Connection via GP16/GP17
-  // Speed: 57600 for 8MHz Pro Mini (or 115200 for some 16MHz)
-  BridgeSerial.setTX(16);
-  BridgeSerial.setRX(17);
-  BridgeSerial.begin(57600);
+  // Speed: 57600 for 8MHz Pro Mini
+  BridgeSerial.setTX(EXTSERIALTX_PIN);
+  BridgeSerial.setRX(EXTSERIALRX_PIN);
+  BridgeSerial.begin(EXTSERIALBAUDRATE);
 
-  DPRINTLN(F("- INIT COMPLETE.\n--------------------------------"));
+  delay(2000);
+  DPRINTLN(F("- INIT START"));
+  
+
+  sdev.init(hal);
+  
+  hal.radio.initReg(CC1101_FREQ2, 0x21);
+  hal.radio.initReg(CC1101_FREQ1, 0x65);
+  hal.radio.initReg(CC1101_FREQ0, 0xCA);
+  hal.runready();
+
+  DPRINTLN(F("- INIT COMPLETE."));
+  HMID stacja(0xBE, 0xBD, 0x0D);
+  HMID termo(0x64,0x4A, 0xB1);
+  uint8_t data[] = {0x00, 0x00, 0x24, 0xEF, 0xE5, 0x22, 0x06, 0x85, 0xCB, 0x88, 0xCD, 0x27, 0x79, 0xE5}; 
+  // len powinno być 0x17, ale musimy odjąć 14 bajtów payloadu
+  deg5.init(0x17-sizeof(data), 0x10, 0x8E, 0x00, 0x00, 0x00);
+  deg5.to(termo);
+  deg5.from(stacja);
+  deg5.append(&data, sizeof(data));
+
+  msgBufferCount = 0;
 }
 
 void loop() {
@@ -422,18 +373,29 @@ void loop() {
   // }
 
 
+  receiveMessages();
+    
 
-  if (msgBufferProcessing == true && updating == false) {
-  
-    receiveMessages();
+  // static unsigned long lastSendTime = 0;
+  // unsigned long currentMillis = millis();
 
+  // If button is LOW (Pressed) AND 500ms has passed since last send
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    // if (currentMillis - lastSendTime >= 1) {
+      //DPRINTLN("Button Pressed: Sending Packet...");
+      
+      // Re-prepare the message (AskSinPP modifies packets in place sometimes)     
+      sdev.send(deg5);
+      
+      // lastSendTime = currentMillis;
+    // }
+  }else{
     if (msgBufferCount > 0) {
       for (uint8_t b = 0; b < msgBufferCount; b++) {
         bool isTelegram = fillLogTable(SerialBuffer[b], b);
-        if (isTelegram && logLengthDisplay < DISPLAY_LOG_LINES) logLengthDisplay++;
       }
       msgBufferCount = 0;
     }
-
   }
+
 }
