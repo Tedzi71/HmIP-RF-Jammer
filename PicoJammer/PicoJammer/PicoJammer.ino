@@ -434,11 +434,6 @@ void loop() {
        lastTime = millis(); 
       }
       // sdev.send(deg5);
-      // if (!sendRaw(fullData, sizeof(fullData))){
-      //   DPRINTLN("SEND FAILED");
-      // }else{
-      //   // DPRINTLN("SEND");
-      // }
       sendRaw(fullData, sizeof(fullData));
       packetCounter++;
 
